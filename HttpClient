@@ -1,0 +1,87 @@
+using System;
+using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.IdentityModel.Clients.ActiveDirectory;
+using Newtonsoft.Json;
+
+namespace Microsoft.Office.OExp.Utilities
+{
+    public static class HttpClientExtension
+    {
+#warning kakevic: integrate this with HttpClientExtension
+        public static AuthenticationHeaderValue GetAuthenticationHeader(string clientId, string clientKey, string resource)
+        {
+            ClientCredential clientCredential = new ClientCredential(clientId, clientKey);
+
+            string aadAuthority = "https://login.microsoftonline.com/Microsoft.com";
+            AuthenticationContext authContext = new AuthenticationContext(aadAuthority);
+            AuthenticationResult result = null;
+            int retryCount = 0;
+            bool retry = false;
+
+            do
+            {
+                retry = false;
+                try
+                {
+                    result = authContext.AcquireTokenAsync(resource, clientCredential).Result;
+                }
+                catch (AdalException ex)
+                {
+                    if (ex.ErrorCode == "temporarily_unavailable")
+                    {
+                        retry = true;
+                        retryCount++;
+                        Thread.Sleep(3000);
+                    }
+
+                    throw ex;
+                }
+            } while ((retry == true) && (retryCount < 3));
+
+            if (result == null)
+            {
+                return null;
+            }
+
+            return new AuthenticationHeaderValue(result.AccessTokenType, result.AccessToken);
+        }
+
+        public static async Task<T> ExecuteRequestWithThrottling<T>(this HttpClient client, string resourceId, string request, string clientId, string clientSecret)
+        {
+            HttpResponseMessage response = ExecuteRequest(client, resourceId, request, clientId, clientSecret);
+
+            if (response.Headers.RetryAfter != null)
+            {
+                TimeSpan? retryDelta = response.Headers.RetryAfter.Delta;
+                int milliseconds = retryDelta.HasValue ? (int)retryDelta.Value.TotalMilliseconds : 60000;
+                Thread.Sleep(milliseconds);
+                return await ExecuteRequestWithThrottling<T>(client, resourceId, request, clientId, clientSecret);
+            }
+
+            if (response.IsSuccessStatusCode)
+            {
+                string responseString = await response.Content.ReadAsStringAsync();
+
+                T responseType = JsonConvert.DeserializeObject<T>(responseString);
+                return responseType;
+            }
+            else
+            {
+                throw new HttpRequestException($"Request failed: {response.StatusCode} : {response.ReasonPhrase} ");
+            }
+        }
+
+        ///<Summary>
+		/// Executes the HttpRequest for the given requestUri
+		/// </Summary>
+		private static HttpResponseMessage ExecuteRequest(this HttpClient client, string resourceId, string requestUri, string clientId, string clientSecret)
+        {
+            // Set authorization header, there is an automatic in-memory cache so this shouldn't actually generate a new token every time
+            client.DefaultRequestHeaders.Authorization = GetAuthenticationHeader(clientId, clientSecret, resourceId);
+            return client.GetAsync(requestUri).Result;
+        }
+    }
+}
